@@ -84,12 +84,18 @@ jobs:
 
       - name: Verify archive
         run: |
-          set -eu
+          set -euo pipefail
           sha256sum "${{ steps.zip.outputs.file }}"
-          unzip -Z -l "${{ steps.zip.outputs.file }}" | grep service.sh | grep -q '^rwx' \
-            || { echo "service.sh lost its exec bit in the archive"; exit 1; }
+          # unzip -Z -l prints "-rwxr-xr-x  ...  service.sh"; the leading dash
+          # matters. This correctly rejects an archive where service.sh is 0644.
+          unzip -Z -l "${{ steps.zip.outputs.file }}" \
+            | grep -q '^-rwx.*service\.sh$' \
+            || { echo "service.sh lost its exec bit in the archive"; \
+                 unzip -Z -l "${{ steps.zip.outputs.file }}"; exit 1; }
           rm -rf unpack && mkdir unpack && (cd unpack && unzip -q "../${{ steps.zip.outputs.file }}")
-          sh -n unpack/service.sh && echo "extracted service.sh: syntax ok, exec bit present"
+          sh -n unpack/service.sh
+          test -x unpack/service.sh || { echo "service.sh not executable after extraction"; exit 1; }
+          echo "extracted service.sh: syntax ok, exec bit present"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
