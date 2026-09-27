@@ -1,0 +1,96 @@
+name: Build Magisk module
+
+on:
+  push:
+    paths:
+      - 'runtime/**'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Package + validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 1. shell syntax for every script, using dash (Android's /system/bin/sh is dash-derived)
+      - name: Syntax check (dash -n)
+        run: |
+          set -eu
+          apt-get update -qq
+          apt-get install -y -qq dash zip
+          for f in runtime/*.sh; do
+            echo "::group::$f"
+            dash -n "$f" && echo "ok: $f"
+            echo "::endgroup::"
+          done
+
+      # 2. no bashisms in anything that runs on-device
+      - name: Reject bashisms
+        run: |
+          set -eu
+          if grep -rnE '<\(|>\(|\[\[|\bsleep_stub' runtime/; then
+            echo "::error::bashism found in on-device script"
+            exit 1
+          fi
+
+      # 3. secrets must never ship
+      - name: Secret scan
+        run: |
+          set -eu
+          if grep -rnE 'ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|ghu_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}' \
+              runtime/ README.md 2>/dev/null; then
+            echo "::error::credential-like string found"
+            exit 1
+          fi
+          echo "clean"
+
+      # 4. the module must be structurally valid before we ship it
+      - name: Module layout check
+        run: |
+          set -eu
+          test -f runtime/module.prop
+          test -f runtime/service.sh
+          test -x runtime/service.sh || { echo "service.sh must be executable"; exit 1; }
+          grep -qE '^id=[a-z0-9_]+$' runtime/module.prop
+          grep -qE '^version=' runtime/module.prop
+
+      # 5. package flat (module.prop at zip root, NOT under runtime/)
+      - name: Build zip
+        id: zip
+        run: |
+          set -eu
+          umask 022
+          cd runtime
+          chmod 0755 service.sh
+          chmod 0644 module.prop
+          OUT="mzram-v$(awk -F= '/^version=/{print $2}' module.prop).zip"
+          zip -q -r "$OUT" module.prop service.sh zram.conf
+          # paths inside the archive must be flat
+          unzip -l "$OUT" | grep -qE '^\s+[0-9]+\s+[^ ]+\s+[^ ]+\s+module\.prop$' \
+            || { echo "module.prop is not at zip root"; unzip -l "$OUT"; exit 1; }
+          mv "$OUT" ../../
+          echo "zip=$OUT" >> "$GITHUB_OUTPUT"
+          echo "size=$(stat -c%s "$OUT") bytes"
+
+      - name: Verify archive
+        run: |
+          set -eu
+          sha256sum "${{ steps.zip.outputs.zip }}"
+          unzip -Z -l "${{ steps.zip.outputs.zip }}" | grep service.sh | grep -q '^rwx' \
+            || { echo "service.sh lost its exec bit in the archive"; exit 1; }
+          rm -rf unpack && mkdir unpack && (cd unpack && unzip -q "../${{ steps.zip.outputs.zip }}")
+          sh -n unpack/service.sh && echo "extracted service.sh: syntax ok, exec bit present"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.zip.outputs.zip }}
+          path: ${{ steps.zip.outputs.zip }}
+          if-no-files-found: error
