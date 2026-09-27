@@ -1,0 +1,5 @@
+id=multizram
+name=Multi-level ZRAM (page-type profiles + idle compression)
+version=1.0.0
+versionCode=1
+description=Three zram tiers with per-profile algorithms and idle thresholds.
