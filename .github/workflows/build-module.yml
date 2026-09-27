@@ -19,12 +19,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 1. shell syntax for every script, using dash (Android's /system/bin/sh is dash-derived)
+      # 1. shell syntax for every script, using dash (Android's /system/bin/sh is dash-derived).
+      #    dash, zip, unzip and sha256sum are all preinstalled on ubuntu-latest,
+      #    so no apt-get here (the runner is not root without sudo).
       - name: Syntax check (dash -n)
         run: |
           set -eu
-          apt-get update -qq
-          apt-get install -y -qq dash zip
           for f in runtime/*.sh; do
             echo "::group::$f"
             dash -n "$f" && echo "ok: $f"
@@ -61,7 +61,8 @@ jobs:
           grep -qE '^id=[a-z0-9_]+$' runtime/module.prop
           grep -qE '^version=' runtime/module.prop
 
-      # 5. package flat (module.prop at zip root, NOT under runtime/)
+      # 5. package flat (module.prop at zip root, NOT under runtime/);
+      #    umask must be 022 or service.sh ships as 0600 and Magisk won't run it
       - name: Build zip
         id: zip
         run: |
@@ -70,27 +71,29 @@ jobs:
           cd runtime
           chmod 0755 service.sh
           chmod 0644 module.prop
-          OUT="mzram-v$(awk -F= '/^version=/{print $2}' module.prop).zip"
+          NAME="mzram-v$(awk -F= '/^version=/{print $2}' module.prop)"
+          OUT="$NAME.zip"
           zip -q -r "$OUT" module.prop service.sh zram.conf
           # paths inside the archive must be flat
           unzip -l "$OUT" | grep -qE '^\s+[0-9]+\s+[^ ]+\s+[^ ]+\s+module\.prop$' \
             || { echo "module.prop is not at zip root"; unzip -l "$OUT"; exit 1; }
-          mv "$OUT" ../../
-          echo "zip=$OUT" >> "$GITHUB_OUTPUT"
-          echo "size=$(stat -c%s "$OUT") bytes"
+          mv "$OUT" ../
+          echo "file=${OUT}" >> "$GITHUB_OUTPUT"
+          echo "zip=${NAME}" >> "$GITHUB_OUTPUT"
+          echo "size=$(stat -c%s "../${OUT}") bytes"
 
       - name: Verify archive
         run: |
           set -eu
-          sha256sum "${{ steps.zip.outputs.zip }}"
-          unzip -Z -l "${{ steps.zip.outputs.zip }}" | grep service.sh | grep -q '^rwx' \
+          sha256sum "${{ steps.zip.outputs.file }}"
+          unzip -Z -l "${{ steps.zip.outputs.file }}" | grep service.sh | grep -q '^rwx' \
             || { echo "service.sh lost its exec bit in the archive"; exit 1; }
-          rm -rf unpack && mkdir unpack && (cd unpack && unzip -q "../${{ steps.zip.outputs.zip }}")
+          rm -rf unpack && mkdir unpack && (cd unpack && unzip -q "../${{ steps.zip.outputs.file }}")
           sh -n unpack/service.sh && echo "extracted service.sh: syntax ok, exec bit present"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.zip.outputs.zip }}
-          path: ${{ steps.zip.outputs.zip }}
+          path: ${{ steps.zip.outputs.file }}
           if-no-files-found: error
